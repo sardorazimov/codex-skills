@@ -8,7 +8,11 @@ rust-version.workspace = true
 
 [[bin]]
 name = "codex-sk"
-path = "src/main.rs"
+path = "src/bin/codex-sk.rs"
+
+[[bin]]
+name = "codex-skils"
+path = "src/bin/codex-skils.rs"
 
 [dependencies]
 codex-sk-core = { path = "../core" }

@@ -1,12 +1,12 @@
 # Architecture Overview
 
-This document describes the intended architecture for codex-sk v0.1. The goal
+This document describes the intended architecture for codex-skils v0.1. The goal
 is to keep the early project understandable, reviewable, and ready for careful
 growth without implying that production runtime behavior exists before it does.
 
 ## Project Goals
 
-codex-sk is a Rust-first infrastructure project with a Python access layer. The
+codex-skils is a Rust-first infrastructure project with a Python access layer. The
 project should provide a reliable core, explicit protocol boundaries, and
 developer tooling that can be understood by contributors without relying on
 hidden service assumptions.
@@ -54,11 +54,23 @@ interfaces. It may depend on `core` and `protocol`.
 
 ### `crates/cli`
 
-`cli` owns the command-line entry point and user-facing terminal behavior.
+`cli` owns the command-line entry points and user-facing terminal behavior.
 
-The CLI should be thin. It should parse arguments, call runtime APIs, report
-results, and return meaningful exit codes. Core behavior should remain in the
-lower-level crates.
+The CLI should parse arguments, generate repository files, load embedded skill
+templates, call runtime APIs where needed, report clear results, and return
+meaningful exit codes. Core behavior should remain in the lower-level crates.
+
+### `templates`
+
+`templates` contains the skill templates embedded into the `codex-skils`
+binary. Keeping templates as files makes them reviewable while `include_str!`
+keeps the installed CLI self-contained.
+
+### `.codex-skils`
+
+Generated project configuration lives under `.codex-skils/`. The initial config
+file is TOML with a `schema_version`, `project_name`, and `default_skills`.
+Generated skill files live under `.codex-skils/skills/`.
 
 ## Rust and Python Boundary
 
@@ -101,6 +113,7 @@ crosses crate, process, protocol, or language boundaries.
 For v0.1, the expected checks are:
 
 - Rust formatting for Rust changes
+- Rust clippy for CLI, runtime, and protocol changes
 - Rust tests for workspace changes
 - Python tests for Python package changes
 - documentation review for architecture, RFC, and contributor-facing changes
@@ -132,7 +145,7 @@ The following are intentionally out of scope for v0.1:
 - distributed system behavior
 - stable external protocol compatibility promises
 - native Python extension bindings
-- complex CLI workflows
+- package-manager installation flows
 - performance tuning before stable behavior exists
 - deployment automation
 - claims of operational readiness

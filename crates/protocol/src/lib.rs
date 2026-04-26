@@ -16,6 +16,12 @@ pub type ProjectResult<T> = Result<T, ProjectError>;
 pub enum ProjectError {
     /// The caller provided an unsupported or incomplete command.
     InvalidCommand(String),
+    /// The caller provided invalid configuration.
+    InvalidConfiguration(String),
+    /// An I/O operation failed.
+    Io(String),
+    /// A validation check failed.
+    ValidationFailed(String),
     /// A component failed a health check.
     Unhealthy(String),
 }
@@ -24,7 +30,12 @@ impl fmt::Display for ProjectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidCommand(command) => write!(formatter, "invalid command: {command}"),
+            Self::InvalidConfiguration(message) => {
+                write!(formatter, "invalid configuration: {message}")
+            }
+            Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::Unhealthy(component) => write!(formatter, "component is unhealthy: {component}"),
+            Self::ValidationFailed(report) => formatter.write_str(report),
         }
     }
 }
