@@ -1,0 +1,3 @@
+schema_version = 1
+project_name = "python"
+default_skills = ["rust", "python", "opensource"]

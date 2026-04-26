@@ -9,6 +9,10 @@ use codex_sk_runtime::{check_health, runtime_info, start_forwarding_server, Forw
 const CONFIG_DIR: &str = ".codex-skils";
 const SKILLS_DIR: &str = ".codex-skils/skills";
 const CONFIG_PATH: &str = ".codex-skils/config.toml";
+const SKILLS_BEGIN_MARKER: &str = "<!-- codex-skils:start -->";
+const SKILLS_END_MARKER: &str = "<!-- codex-skils:end -->";
+const README_RULES_BEGIN_MARKER: &str = "<!-- codex-skils:readme:start -->";
+const README_RULES_END_MARKER: &str = "<!-- codex-skils:readme:end -->";
 
 const REQUIRED_PATHS: &[RequiredPath] = &[
     RequiredPath::file("README.md"),
@@ -20,15 +24,36 @@ const REQUIRED_PATHS: &[RequiredPath] = &[
 ];
 
 const TEMPLATES: &[SkillTemplate] = &[
-    SkillTemplate::new("rust", include_str!("../../../templates/rust.md")),
-    SkillTemplate::new("python", include_str!("../../../templates/python.md")),
+    SkillTemplate::new(
+        "rust",
+        "Rust crate, CLI, runtime, and protocol engineering.",
+        include_str!("../../../templates/rust.md"),
+    ),
+    SkillTemplate::new(
+        "python",
+        "Python SDK and developer-facing API work.",
+        include_str!("../../../templates/python.md"),
+    ),
     SkillTemplate::new(
         "opensource",
+        "Contributor workflow and maintainer documentation.",
         include_str!("../../../templates/opensource.md"),
     ),
-    SkillTemplate::new("devops", include_str!("../../../templates/devops.md")),
-    SkillTemplate::new("security", include_str!("../../../templates/security.md")),
-    SkillTemplate::new("testing", include_str!("../../../templates/testing.md")),
+    SkillTemplate::new(
+        "devops",
+        "CI, release checks, scripts, and automation.",
+        include_str!("../../../templates/devops.md"),
+    ),
+    SkillTemplate::new(
+        "security",
+        "Validation, secret handling, and security-sensitive changes.",
+        include_str!("../../../templates/security.md"),
+    ),
+    SkillTemplate::new(
+        "testing",
+        "Test strategy, fixtures, and regression coverage.",
+        include_str!("../../../templates/testing.md"),
+    ),
 ];
 
 /// Runs the command-line entry point.
@@ -60,9 +85,20 @@ fn run_in_root(root: &Path, args: &[String]) -> ProjectResult<String> {
         [command] if command == "--help" || command == "-h" => Ok(help_output()),
         [command] if command == "init" => init_project(root, false),
         [command, flag] if command == "init" && flag == "--force" => init_project(root, true),
+        [command, flags @ ..] if command == "apply" => {
+            apply_skills(root, ApplyOptions::parse(flags)?)
+        }
+        [command] if command == "list" => Ok(list_skills()),
         [command] if command == "check" => check_project(root),
         [command, subcommand] if command == "health" && subcommand == "check" => health_output(),
-        [command, skill_name] if command == "skill" => skill_template_output(skill_name),
+        [command, skill_name] if command == "skill" => {
+            skill_template_output(skill_name, OutputFormat::Markdown)
+        }
+        [command, skill_name, format_flag, format]
+            if command == "skill" && format_flag == "--format" =>
+        {
+            skill_template_output(skill_name, OutputFormat::parse(format)?)
+        }
         [command, skill_name, flag] if command == "skill" && flag == "--write" => {
             write_skill_template(root, skill_name, false)
         }
@@ -75,6 +111,35 @@ fn run_in_root(root: &Path, args: &[String]) -> ProjectResult<String> {
             if command == "skill" && force_flag == "--force" && write_flag == "--write" =>
         {
             write_skill_template(root, skill_name, true)
+        }
+        [command, all_flag] if command == "export" && all_flag == "--all" => {
+            export_all(root, OutputFormat::Markdown, None)
+        }
+        [command, all_flag, format_flag, format]
+            if command == "export" && all_flag == "--all" && format_flag == "--format" =>
+        {
+            export_all(root, OutputFormat::parse(format)?, None)
+        }
+        [command, all_flag, output_flag, output]
+            if command == "export" && all_flag == "--all" && output_flag == "--output" =>
+        {
+            export_all(root, OutputFormat::Markdown, Some(output))
+        }
+        [command, all_flag, format_flag, format, output_flag, output]
+            if command == "export"
+                && all_flag == "--all"
+                && format_flag == "--format"
+                && output_flag == "--output" =>
+        {
+            export_all(root, OutputFormat::parse(format)?, Some(output))
+        }
+        [command, all_flag, output_flag, output, format_flag, format]
+            if command == "export"
+                && all_flag == "--all"
+                && output_flag == "--output"
+                && format_flag == "--format" =>
+        {
+            export_all(root, OutputFormat::parse(format)?, Some(output))
         }
         [command, listen_flag, listen_port, target_flag, target_port]
             if command == "start-server"
@@ -126,8 +191,11 @@ fn help_output() -> String {
             "Usage:",
             "  codex-skils --version",
             "  codex-skils init [--force]",
-            "  codex-skils skill <name>",
+            "  codex-skils apply [--force] [--dry-run] [--readme]",
+            "  codex-skils list",
+            "  codex-skils skill <name> [--format markdown|json|yaml]",
             "  codex-skils skill <name> --write [--force]",
+            "  codex-skils export --all [--format markdown|json|yaml] [--output <DIR>]",
             "  codex-skils check",
             "  codex-skils health check",
             "  codex-skils start-server --listen-port <PORT> --target-port <PORT>",
@@ -186,8 +254,254 @@ fn check_project(root: &Path) -> ProjectResult<String> {
     }
 }
 
-fn skill_template_output(skill_name: &str) -> ProjectResult<String> {
-    Ok(template_by_name(skill_name)?.body.to_string())
+fn apply_skills(root: &Path, options: ApplyOptions) -> ProjectResult<String> {
+    let skills = read_project_skills(root)?;
+    let mut changes = Vec::new();
+
+    changes.push(apply_managed_section(
+        root,
+        "AGENTS.md",
+        "## Skills",
+        SKILLS_BEGIN_MARKER,
+        SKILLS_END_MARKER,
+        &format_skills_section(&skills),
+        ApplyTarget {
+            force: options.force,
+            dry_run: options.dry_run,
+            create_if_missing: true,
+        },
+    )?);
+
+    if options.update_readme {
+        changes.push(apply_managed_section(
+            root,
+            "README.md",
+            "## Development Rules",
+            README_RULES_BEGIN_MARKER,
+            README_RULES_END_MARKER,
+            &format_development_rules_section(&skills),
+            ApplyTarget {
+                force: options.force,
+                dry_run: options.dry_run,
+                create_if_missing: true,
+            },
+        )?);
+    }
+
+    Ok(format_apply_report(skills.len(), options.dry_run, &changes))
+}
+
+fn read_project_skills(root: &Path) -> ProjectResult<Vec<ProjectSkill>> {
+    let skills_dir = root.join(SKILLS_DIR);
+
+    if !skills_dir.is_dir() {
+        return Err(ProjectError::InvalidConfiguration(format!(
+            "no skills found in {SKILLS_DIR}"
+        )));
+    }
+
+    let mut paths = fs::read_dir(&skills_dir)
+        .map_err(project_io_error)?
+        .map(|entry| entry.map(|entry| entry.path()).map_err(project_io_error))
+        .collect::<ProjectResult<Vec<_>>>()?;
+
+    paths.sort();
+
+    let mut skills = Vec::new();
+    for path in paths {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+            continue;
+        }
+
+        let Some(name) = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .map(ToString::to_string)
+        else {
+            continue;
+        };
+
+        let content = fs::read_to_string(&path).map_err(project_io_error)?;
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        skills.push(ProjectSkill { name, content });
+    }
+
+    if skills.is_empty() {
+        return Err(ProjectError::InvalidConfiguration(format!(
+            "no skills found in {SKILLS_DIR}"
+        )));
+    }
+
+    Ok(skills)
+}
+
+fn apply_managed_section(
+    root: &Path,
+    relative: &str,
+    heading: &str,
+    begin_marker: &str,
+    end_marker: &str,
+    body: &str,
+    target: ApplyTarget,
+) -> ProjectResult<ChangeSummary> {
+    let path = root.join(relative);
+    if !path.exists() && target.create_if_missing {
+        let section = managed_section(heading, begin_marker, end_marker, body);
+        if !target.dry_run {
+            fs::write(path, section).map_err(project_io_error)?;
+        }
+        return Ok(ChangeSummary {
+            status: target.status_for_write(),
+            path: relative.to_string(),
+            detail: "file created with managed section",
+        });
+    }
+
+    if !path.is_file() {
+        return Err(ProjectError::InvalidConfiguration(format!(
+            "missing required file: {relative}"
+        )));
+    }
+
+    let original = fs::read_to_string(&path).map_err(project_io_error)?;
+    let section = managed_section(heading, begin_marker, end_marker, body);
+
+    let (updated, status, detail) = match find_managed_section(&original, begin_marker, end_marker)
+    {
+        Ok(Some((start, end))) => {
+            let current = &original[start..end];
+            if current == section {
+                (
+                    original.clone(),
+                    ChangeStatus::Unchanged,
+                    "managed section already up to date",
+                )
+            } else {
+                let mut next = String::new();
+                next.push_str(&original[..start]);
+                next.push_str(&section);
+                next.push_str(&original[end..]);
+                (next, target.status_for_write(), "managed section replaced")
+            }
+        }
+        Ok(None) => (
+            append_section(&original, &section),
+            target.status_for_write(),
+            "managed section added",
+        ),
+        Err(message) if target.force => {
+            let cleaned = remove_managed_markers(&original, begin_marker, end_marker);
+            (
+                append_section(&cleaned, &section),
+                target.status_for_write(),
+                "malformed managed section rebuilt",
+            )
+        }
+        Err(error) => return Err(error),
+    };
+
+    if updated != original && !target.dry_run {
+        fs::write(path, updated).map_err(project_io_error)?;
+    }
+
+    Ok(ChangeSummary {
+        status,
+        path: relative.to_string(),
+        detail,
+    })
+}
+
+fn managed_section(heading: &str, begin_marker: &str, end_marker: &str, body: &str) -> String {
+    format!("{begin_marker}\n{heading}\n\n{body}\n\n{end_marker}\n")
+}
+
+fn append_section(original: &str, section: &str) -> String {
+    let mut updated = original.trim_end().to_string();
+    if !updated.is_empty() {
+        updated.push_str("\n\n");
+    }
+    updated.push_str(section);
+    updated
+}
+
+fn find_managed_section(
+    content: &str,
+    begin_marker: &str,
+    end_marker: &str,
+) -> ProjectResult<Option<(usize, usize)>> {
+    let begin = content.find(begin_marker);
+    let end = content.find(end_marker);
+
+    let (Some(begin), Some(end_marker_start)) = (begin, end) else {
+        return if begin.is_some() || end.is_some() {
+            Err(ProjectError::InvalidConfiguration(format!(
+                "malformed managed section markers for {begin_marker} / {end_marker}; use --force to rebuild"
+            )))
+        } else {
+            Ok(None)
+        };
+    };
+
+    if end_marker_start < begin {
+        return Err(ProjectError::InvalidConfiguration(format!(
+            "malformed managed section markers for {begin_marker} / {end_marker}; use --force to rebuild"
+        )));
+    }
+
+    let mut end = end_marker_start + end_marker.len();
+
+    if content[end..].starts_with('\n') {
+        end += 1;
+    }
+
+    Ok(Some((begin, end)))
+}
+
+fn remove_managed_markers(content: &str, begin_marker: &str, end_marker: &str) -> String {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed != begin_marker && trimmed != end_marker
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_skills_section(skills: &[ProjectSkill]) -> String {
+    skills
+        .iter()
+        .map(|skill| format!("### {}\n\n{}", skill.name, skill.content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_development_rules_section(skills: &[ProjectSkill]) -> String {
+    let mut lines = vec![
+        "This project uses codex-skils to manage AI/Codex engineering rules.".to_string(),
+        String::new(),
+        "Active skills:".to_string(),
+        String::new(),
+    ];
+    lines.extend(skills.iter().map(|skill| format!("- {}", skill.name)));
+    lines.join("\n")
+}
+
+fn list_skills() -> String {
+    let mut lines = vec!["available skills".to_string()];
+    lines.extend(
+        TEMPLATES
+            .iter()
+            .map(|template| format!("{} - {}", template.name, template.description)),
+    );
+    lines.join("\n")
+}
+
+fn skill_template_output(skill_name: &str, format: OutputFormat) -> ProjectResult<String> {
+    Ok(format_skill(template_by_name(skill_name)?, format))
 }
 
 fn write_skill_template(root: &Path, skill_name: &str, force: bool) -> ProjectResult<String> {
@@ -196,6 +510,41 @@ fn write_skill_template(root: &Path, skill_name: &str, force: bool) -> ProjectRe
     let action = write_file(root, &path, template.body.to_string(), force)?;
 
     Ok(format_actions("skill write complete", &[action]))
+}
+
+fn export_all(root: &Path, format: OutputFormat, output: Option<&str>) -> ProjectResult<String> {
+    match output {
+        Some(output_dir) => export_all_to_dir(root, format, output_dir),
+        None => Ok(format_all_skills(format)),
+    }
+}
+
+fn export_all_to_dir(root: &Path, format: OutputFormat, output_dir: &str) -> ProjectResult<String> {
+    let output_root = root.join(output_dir);
+    fs::create_dir_all(&output_root).map_err(project_io_error)?;
+
+    match format {
+        OutputFormat::Markdown => {
+            let actions = TEMPLATES
+                .iter()
+                .map(|template| {
+                    let relative = format!("{output_dir}/{}.md", template.name);
+                    write_file(root, &relative, template.body.to_string(), true)
+                })
+                .collect::<ProjectResult<Vec<_>>>()?;
+            Ok(format_actions("export complete", &actions))
+        }
+        OutputFormat::Json => {
+            let relative = format!("{output_dir}/skills.json");
+            let action = write_file(root, &relative, format_all_skills(format), true)?;
+            Ok(format_actions("export complete", &[action]))
+        }
+        OutputFormat::Yaml => {
+            let relative = format!("{output_dir}/skills.yaml");
+            let action = write_file(root, &relative, format_all_skills(format), true)?;
+            Ok(format_actions("export complete", &[action]))
+        }
+    }
 }
 
 fn template_by_name(name: &str) -> ProjectResult<&'static SkillTemplate> {
@@ -318,6 +667,18 @@ fn format_actions(title: &str, actions: &[FileAction]) -> String {
     lines.join("\n")
 }
 
+fn format_apply_report(skill_count: usize, dry_run: bool, changes: &[ChangeSummary]) -> String {
+    let mut lines = vec![
+        "apply complete".to_string(),
+        format!("found {skill_count} skill(s)"),
+    ];
+    lines.extend(changes.iter().map(ChangeSummary::line));
+    if dry_run {
+        lines.push("dry run: no files changed".to_string());
+    }
+    lines.join("\n")
+}
+
 fn format_check_report(items: &[CheckItem]) -> String {
     let mut lines = Vec::with_capacity(items.len() + 1);
     let failed = items.iter().filter(|item| !item.is_valid()).count();
@@ -347,13 +708,195 @@ fn command_text(args: &[String]) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SkillTemplate {
     name: &'static str,
+    description: &'static str,
     body: &'static str,
 }
 
 impl SkillTemplate {
-    const fn new(name: &'static str, body: &'static str) -> Self {
-        Self { name, body }
+    const fn new(name: &'static str, description: &'static str, body: &'static str) -> Self {
+        Self {
+            name,
+            description,
+            body,
+        }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectSkill {
+    name: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ApplyOptions {
+    update_readme: bool,
+    force: bool,
+    dry_run: bool,
+}
+
+impl ApplyOptions {
+    fn parse(flags: &[String]) -> ProjectResult<Self> {
+        let mut options = Self::default();
+
+        for flag in flags {
+            match flag.as_str() {
+                "--readme" => options.update_readme = true,
+                "--force" => options.force = true,
+                "--dry-run" => options.dry_run = true,
+                _ => {
+                    return Err(ProjectError::InvalidCommand(format!(
+                        "apply {}",
+                        flags.join(" ")
+                    )))
+                }
+            }
+        }
+
+        Ok(options)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApplyTarget {
+    force: bool,
+    dry_run: bool,
+    create_if_missing: bool,
+}
+
+impl ApplyTarget {
+    const fn status_for_write(self) -> ChangeStatus {
+        if self.dry_run {
+            ChangeStatus::WouldUpdate
+        } else {
+            ChangeStatus::Updated
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Markdown,
+    Json,
+    Yaml,
+}
+
+impl OutputFormat {
+    fn parse(value: &str) -> ProjectResult<Self> {
+        match value {
+            "markdown" => Ok(Self::Markdown),
+            "json" => Ok(Self::Json),
+            "yaml" => Ok(Self::Yaml),
+            _ => Err(ProjectError::InvalidConfiguration(format!(
+                "unknown format '{value}'. Supported formats: markdown, json, yaml"
+            ))),
+        }
+    }
+}
+
+fn format_skill(template: &SkillTemplate, format: OutputFormat) -> String {
+    match format {
+        OutputFormat::Markdown => template.body.to_string(),
+        OutputFormat::Json => format!(
+            "{{\n  \"name\": \"{}\",\n  \"description\": \"{}\",\n  \"content\": \"{}\"\n}}",
+            json_escape(template.name),
+            json_escape(template.description),
+            json_escape(template.body)
+        ),
+        OutputFormat::Yaml => format!(
+            "name: {}\ndescription: {}\ncontent: |\n{}",
+            yaml_scalar(template.name),
+            yaml_scalar(template.description),
+            indent_block(template.body)
+        ),
+    }
+}
+
+fn format_all_skills(format: OutputFormat) -> String {
+    match format {
+        OutputFormat::Markdown => TEMPLATES
+            .iter()
+            .map(|template| template.body.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n"),
+        OutputFormat::Json => {
+            let skills = TEMPLATES
+                .iter()
+                .map(|template| {
+                    format!(
+                        "    {{\n      \"name\": \"{}\",\n      \"description\": \"{}\",\n      \"content\": \"{}\"\n    }}",
+                        json_escape(template.name),
+                        json_escape(template.description),
+                        json_escape(template.body)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",\n");
+            format!("{{\n  \"skills\": [\n{skills}\n  ]\n}}")
+        }
+        OutputFormat::Yaml => {
+            let skills = TEMPLATES
+                .iter()
+                .map(|template| {
+                    format!(
+                        "  - name: {}\n    description: {}\n    content: |\n{}",
+                        yaml_scalar(template.name),
+                        yaml_scalar(template.description),
+                        indent_block_with(template.body, "      ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("skills:\n{skills}")
+        }
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            value if value.is_control() => {
+                push_json_unicode_escape(&mut escaped, value);
+            }
+            value => escaped.push(value),
+        }
+    }
+
+    escaped
+}
+
+fn push_json_unicode_escape(output: &mut String, character: char) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let value = character as u32;
+
+    output.push_str("\\u");
+    for shift in [12, 8, 4, 0] {
+        let index = ((value >> shift) & 0x0f) as usize;
+        output.push(HEX[index] as char);
+    }
+}
+
+fn yaml_scalar(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn indent_block(value: &str) -> String {
+    indent_block_with(value, "  ")
+}
+
+fn indent_block_with(value: &str, prefix: &str) -> String {
+    value
+        .lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +904,36 @@ struct FileAction {
     status: FileStatus,
     path: String,
     detail: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangeSummary {
+    status: ChangeStatus,
+    path: String,
+    detail: &'static str,
+}
+
+impl ChangeSummary {
+    fn line(&self) -> String {
+        format!("{} {} ({})", self.status.as_str(), self.path, self.detail)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeStatus {
+    Updated,
+    Unchanged,
+    WouldUpdate,
+}
+
+impl ChangeStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Updated => "updated",
+            Self::Unchanged => "unchanged",
+            Self::WouldUpdate => "would update",
+        }
+    }
 }
 
 impl FileAction {
@@ -505,7 +1078,11 @@ mod tests {
         let output = run_in_root(&test_root("help")?, &strings(&["--help"]))?;
 
         assert!(output.contains("codex-skils init [--force]"));
+        assert!(output.contains("codex-skils apply [--force] [--dry-run] [--readme]"));
+        assert!(output.contains("codex-skils list"));
+        assert!(output.contains("codex-skils skill <name> [--format markdown|json|yaml]"));
         assert!(output.contains("codex-skils skill <name> --write [--force]"));
+        assert!(output.contains("codex-skils export --all [--format markdown|json|yaml]"));
         assert!(output
             .contains("Available skills: rust, python, opensource, devops, security, testing"));
         Ok(())
@@ -550,6 +1127,29 @@ mod tests {
             assert!(template.body.contains("##"));
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn list_prints_all_skills_with_descriptions() -> ProjectResult<()> {
+        let root = test_root("list")?;
+
+        let output = run_in_root(&root, &strings(&["list"]))?;
+
+        for name in [
+            "rust",
+            "python",
+            "opensource",
+            "devops",
+            "security",
+            "testing",
+        ] {
+            assert!(output.contains(name));
+        }
+        assert!(output.contains("Rust crate, CLI, runtime, and protocol engineering."));
+        assert!(output.contains("Test strategy, fixtures, and regression coverage."));
+
+        cleanup(&root)?;
         Ok(())
     }
 
@@ -651,6 +1251,356 @@ mod tests {
 
         assert!(output.contains("# DevOps Skill"));
         assert!(!root.join(".codex-skils/skills/devops.md").exists());
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn skill_markdown_format_prints_template() -> ProjectResult<()> {
+        let root = test_root("skill-markdown")?;
+
+        let output = run_in_root(&root, &strings(&["skill", "rust", "--format", "markdown"]))?;
+
+        assert!(output.starts_with("# Rust Engineering Skill"));
+        assert!(output.contains("## Required Checks"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn skill_json_format_includes_name_description_and_content() -> ProjectResult<()> {
+        let root = test_root("skill-json")?;
+
+        let output = run_in_root(&root, &strings(&["skill", "python", "--format", "json"]))?;
+
+        assert!(output.contains("\"name\": \"python\""));
+        assert!(output.contains("\"description\": \"Python SDK and developer-facing API work.\""));
+        assert!(output.contains("\"content\": \"# Python SDK Skill\\n"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn skill_yaml_format_includes_name_description_and_content() -> ProjectResult<()> {
+        let root = test_root("skill-yaml")?;
+
+        let output = run_in_root(&root, &strings(&["skill", "security", "--format", "yaml"]))?;
+
+        assert!(output.contains("name: \"security\""));
+        assert!(output.contains(
+            "description: \"Validation, secret handling, and security-sensitive changes.\""
+        ));
+        assert!(output.contains("content: |\n  # Security Skill"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_format_returns_useful_error() -> ProjectResult<()> {
+        let root = test_root("unknown-format")?;
+
+        let error = run_in_root(&root, &strings(&["skill", "rust", "--format", "toml"]))
+            .err()
+            .ok_or_else(|| {
+                ProjectError::InvalidConfiguration("expected format error".to_string())
+            })?;
+
+        assert_eq!(
+            error,
+            ProjectError::InvalidConfiguration(
+                "unknown format 'toml'. Supported formats: markdown, json, yaml".to_string()
+            )
+        );
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn export_all_prints_markdown_by_default() -> ProjectResult<()> {
+        let root = test_root("export-markdown")?;
+
+        let output = run_in_root(&root, &strings(&["export", "--all"]))?;
+
+        assert!(output.contains("# Rust Engineering Skill"));
+        assert!(output.contains("# Testing Skill"));
+        assert!(output.contains("\n\n---\n\n"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn export_all_prints_json() -> ProjectResult<()> {
+        let root = test_root("export-json")?;
+
+        let output = run_in_root(&root, &strings(&["export", "--all", "--format", "json"]))?;
+
+        assert!(output.contains("\"skills\": ["));
+        assert!(output.contains("\"name\": \"rust\""));
+        assert!(
+            output.contains("\"description\": \"CI, release checks, scripts, and automation.\"")
+        );
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn export_output_directory_writes_markdown_files() -> ProjectResult<()> {
+        let root = test_root("export-output-markdown")?;
+
+        let output = run_in_root(
+            &root,
+            &strings(&["export", "--all", "--output", ".codex-skils/export"]),
+        )?;
+
+        assert!(output.contains("created .codex-skils/export/rust.md"));
+        assert!(root.join(".codex-skils/export/rust.md").is_file());
+        assert!(root.join(".codex-skils/export/testing.md").is_file());
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn export_output_directory_writes_json_file() -> ProjectResult<()> {
+        let root = test_root("export-output-json")?;
+
+        let output = run_in_root(
+            &root,
+            &strings(&[
+                "export",
+                "--all",
+                "--format",
+                "json",
+                "--output",
+                ".codex-skils/export",
+            ]),
+        )?;
+        let contents = fs::read_to_string(root.join(".codex-skils/export/skills.json"))
+            .map_err(project_io_error)?;
+
+        assert!(output.contains("created .codex-skils/export/skills.json"));
+        assert!(contents.contains("\"name\": \"security\""));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn export_output_directory_writes_yaml_file() -> ProjectResult<()> {
+        let root = test_root("export-output-yaml")?;
+
+        let output = run_in_root(
+            &root,
+            &strings(&[
+                "export",
+                "--all",
+                "--output",
+                ".codex-skils/export",
+                "--format",
+                "yaml",
+            ]),
+        )?;
+        let contents = fs::read_to_string(root.join(".codex-skils/export/skills.yaml"))
+            .map_err(project_io_error)?;
+
+        assert!(output.contains("created .codex-skils/export/skills.yaml"));
+        assert!(contents.contains("name: \"testing\""));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_fails_when_no_skills_exist() -> ProjectResult<()> {
+        let root = test_root("apply-no-skills")?;
+        fs::create_dir_all(root.join(SKILLS_DIR)).map_err(project_io_error)?;
+
+        let error = run_in_root(&root, &strings(&["apply"]))
+            .err()
+            .ok_or_else(|| {
+                ProjectError::InvalidConfiguration("expected apply error".to_string())
+            })?;
+
+        assert_eq!(
+            error,
+            ProjectError::InvalidConfiguration(format!("no skills found in {SKILLS_DIR}"))
+        );
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_creates_agents_section() -> ProjectResult<()> {
+        let root = test_root("apply-create-agents")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/rust.md"),
+            "# Rust Skill\n\nUse Rust.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["apply"]))?;
+        let agents = fs::read_to_string(root.join("AGENTS.md")).map_err(project_io_error)?;
+
+        assert!(output.contains("apply complete"));
+        assert!(output.contains("found 1 skill(s)"));
+        assert!(output.contains("updated AGENTS.md (file created with managed section)"));
+        assert!(agents.starts_with(SKILLS_BEGIN_MARKER));
+        assert!(agents.contains("## Skills"));
+        assert!(agents.contains("### rust"));
+        assert!(agents.contains("# Rust Skill"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_updates_existing_managed_section() -> ProjectResult<()> {
+        let root = test_root("apply-update-managed")?;
+        let agents = format!("{SKILLS_BEGIN_MARKER}\n## Skills\n\nold\n\n{SKILLS_END_MARKER}\n");
+        write_test_file(&root.join("AGENTS.md"), &agents)?;
+        write_test_file(
+            &root.join(".codex-skils/skills/security.md"),
+            "# Security Skill\n",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["apply"]))?;
+        let agents = fs::read_to_string(root.join("AGENTS.md")).map_err(project_io_error)?;
+
+        assert!(output.contains("updated AGENTS.md (managed section replaced)"));
+        assert!(!agents.contains("old"));
+        assert!(agents.contains("# Security Skill"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_does_not_duplicate_content() -> ProjectResult<()> {
+        let root = test_root("apply-idempotent")?;
+        write_test_file(&root.join(".codex-skils/skills/rust.md"), "# Rust Skill\n")?;
+
+        let first = run_in_root(&root, &strings(&["apply"]))?;
+        let second = run_in_root(&root, &strings(&["apply"]))?;
+        let agents = fs::read_to_string(root.join("AGENTS.md")).map_err(project_io_error)?;
+
+        assert!(first.contains("updated AGENTS.md"));
+        assert!(second.contains("unchanged AGENTS.md"));
+        assert_eq!(agents.matches(SKILLS_BEGIN_MARKER).count(), 1);
+        assert_eq!(agents.matches("# Rust Skill").count(), 1);
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_preserves_content_outside_managed_section() -> ProjectResult<()> {
+        let root = test_root("apply-preserve")?;
+        let agents = "# AGENTS.md\n\n## Existing\n\nKeep this.\n".to_string();
+        write_test_file(&root.join("AGENTS.md"), &agents)?;
+        write_test_file(
+            &root.join(".codex-skils/skills/testing.md"),
+            "# Testing Skill\n",
+        )?;
+
+        run_in_root(&root, &strings(&["apply"]))?;
+        let agents = fs::read_to_string(root.join("AGENTS.md")).map_err(project_io_error)?;
+
+        assert!(agents.contains("# AGENTS.md"));
+        assert!(agents.contains("## Existing\n\nKeep this."));
+        assert!(agents.contains("# Testing Skill"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_dry_run_writes_nothing() -> ProjectResult<()> {
+        let root = test_root("apply-dry-run")?;
+        write_test_file(&root.join(".codex-skils/skills/rust.md"), "# Rust Skill\n")?;
+
+        let output = run_in_root(&root, &strings(&["apply", "--dry-run"]))?;
+
+        assert!(output.contains("found 1 skill(s)"));
+        assert!(output.contains("would update AGENTS.md"));
+        assert!(output.contains("dry run: no files changed"));
+        assert!(!root.join("AGENTS.md").exists());
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_readme_updates_readme_managed_section() -> ProjectResult<()> {
+        let root = test_root("apply-readme")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/security.md"),
+            "# Security Skill\n",
+        )?;
+        write_test_file(
+            &root.join(".codex-skils/skills/testing.md"),
+            "# Testing Skill\n",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["apply", "--readme"]))?;
+        let readme = fs::read_to_string(root.join("README.md")).map_err(project_io_error)?;
+
+        assert!(output.contains("updated README.md"));
+        assert!(readme.contains(README_RULES_BEGIN_MARKER));
+        assert!(readme.contains("## Development Rules"));
+        assert!(readme.contains("This project uses codex-skils"));
+        assert!(readme.contains("- security"));
+        assert!(readme.contains("- testing"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_markers_fail_without_force() -> ProjectResult<()> {
+        let root = test_root("apply-malformed")?;
+        write_test_file(
+            &root.join("AGENTS.md"),
+            &format!("{SKILLS_BEGIN_MARKER}\nold\n"),
+        )?;
+        write_test_file(&root.join(".codex-skils/skills/rust.md"), "# Rust Skill\n")?;
+
+        let error = run_in_root(&root, &strings(&["apply"]))
+            .err()
+            .ok_or_else(|| {
+                ProjectError::InvalidConfiguration("expected malformed marker error".to_string())
+            })?;
+
+        assert!(error
+            .to_string()
+            .contains("malformed managed section markers"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_markers_recover_with_force() -> ProjectResult<()> {
+        let root = test_root("apply-malformed-force")?;
+        write_test_file(
+            &root.join("AGENTS.md"),
+            &format!("# AGENTS.md\n{SKILLS_BEGIN_MARKER}\nold\n"),
+        )?;
+        write_test_file(&root.join(".codex-skils/skills/rust.md"), "# Rust Skill\n")?;
+
+        let output = run_in_root(&root, &strings(&["apply", "--force"]))?;
+        let agents = fs::read_to_string(root.join("AGENTS.md")).map_err(project_io_error)?;
+
+        assert!(output.contains("updated AGENTS.md (malformed managed section rebuilt)"));
+        assert!(agents.contains("# AGENTS.md"));
+        assert!(agents.contains(SKILLS_END_MARKER));
+        assert!(agents.contains("# Rust Skill"));
 
         cleanup(&root)?;
         Ok(())
