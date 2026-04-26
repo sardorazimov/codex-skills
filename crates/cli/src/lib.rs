@@ -88,6 +88,13 @@ fn run_in_root(root: &Path, args: &[String]) -> ProjectResult<String> {
         [command, flags @ ..] if command == "apply" => {
             apply_skills(root, ApplyOptions::parse(flags)?)
         }
+        [command] if command == "codex" => generate_codex_prompt(root, None),
+        [command, flag] if command == "codex" && flag == "--print" => {
+            generate_codex_prompt(root, None)
+        }
+        [command, output_flag, output] if command == "codex" && output_flag == "--output" => {
+            generate_codex_prompt(root, Some(output))
+        }
         [command] if command == "list" => Ok(list_skills()),
         [command] if command == "check" => check_project(root),
         [command, subcommand] if command == "health" && subcommand == "check" => health_output(),
@@ -192,6 +199,7 @@ fn help_output() -> String {
             "  codex-skils --version",
             "  codex-skils init [--force]",
             "  codex-skils apply [--force] [--dry-run] [--readme]",
+            "  codex-skils codex [--print|--output <FILE>]",
             "  codex-skils list",
             "  codex-skils skill <name> [--format markdown|json|yaml]",
             "  codex-skils skill <name> --write [--force]",
@@ -254,6 +262,139 @@ fn check_project(root: &Path) -> ProjectResult<String> {
     }
 }
 
+fn generate_codex_prompt(root: &Path, output: Option<&str>) -> ProjectResult<String> {
+    let agents = read_optional_file(&root.join("AGENTS.md"))?;
+    let skills = read_project_skills_optional(root)?;
+    let prompt = build_codex_prompt(agents.as_deref(), &skills);
+    let summary = format!("codex prompt generated\nmerged {} skill(s)", skills.len());
+
+    if let Some(output) = output {
+        let path = root.join(output);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(project_io_error)?;
+        }
+        fs::write(path, prompt).map_err(project_io_error)?;
+        Ok(format!("{summary}\nwrote {output}"))
+    } else {
+        Ok(format!("{summary}\n\n{prompt}"))
+    }
+}
+
+fn read_optional_file(path: &Path) -> ProjectResult<Option<String>> {
+    if path.is_file() {
+        fs::read_to_string(path).map(Some).map_err(project_io_error)
+    } else {
+        Ok(None)
+    }
+}
+
+fn read_project_skills_optional(root: &Path) -> ProjectResult<Vec<ProjectSkill>> {
+    let skills_dir = root.join(SKILLS_DIR);
+    if !skills_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    read_project_skills_from_dir(&skills_dir, false)
+}
+
+fn build_codex_prompt(agents: Option<&str>, skills: &[ProjectSkill]) -> String {
+    let mut sections = Vec::new();
+
+    if let Some(agents) = agents.and_then(non_empty_trimmed) {
+        if let Some(cleaned) = non_empty_trimmed(&strip_codex_managed_sections(agents)) {
+            sections.push(cleaned.to_string());
+        }
+    }
+
+    sections.extend(deduplicated_skill_sections(skills));
+
+    let rules = if sections.is_empty() {
+        "No repository-specific skills were found.".to_string()
+    } else {
+        sections.join("\n\n")
+    };
+
+    format!(
+        "You are a senior software engineer working in this repository.\n\nFollow these rules strictly:\n\n{rules}\n\nOperating instructions:\n- Make minimal changes\n- Keep code consistent\n- Run required checks before finishing\n- Do not break existing behavior\n- Explain changes briefly"
+    )
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn strip_codex_managed_sections(content: &str) -> String {
+    let without_skills = remove_complete_section(content, SKILLS_BEGIN_MARKER, SKILLS_END_MARKER);
+    remove_complete_section(
+        &without_skills,
+        README_RULES_BEGIN_MARKER,
+        README_RULES_END_MARKER,
+    )
+}
+
+fn remove_complete_section(content: &str, begin_marker: &str, end_marker: &str) -> String {
+    let mut remaining = content.to_string();
+
+    while let Ok(Some((start, end))) = find_managed_section(&remaining, begin_marker, end_marker) {
+        remaining.replace_range(start..end, "");
+    }
+
+    remaining.trim().to_string()
+}
+
+fn deduplicated_skill_sections(skills: &[ProjectSkill]) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut seen_headings = Vec::new();
+
+    for skill in skills {
+        for section in split_markdown_sections(&skill.content) {
+            let key = section_key(&section);
+            if seen_headings.iter().any(|seen| seen == &key) {
+                continue;
+            }
+            seen_headings.push(key);
+            sections.push(section);
+        }
+    }
+
+    sections
+}
+
+fn split_markdown_sections(content: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut current = Vec::new();
+
+    for line in content.trim().lines() {
+        if line.starts_with("# ") && !current.is_empty() {
+            sections.push(current.join("\n").trim().to_string());
+            current.clear();
+        }
+        current.push(line.to_string());
+    }
+
+    if !current.is_empty() {
+        sections.push(current.join("\n").trim().to_string());
+    }
+
+    sections
+        .into_iter()
+        .filter(|section| !section.is_empty())
+        .collect()
+}
+
+fn section_key(section: &str) -> String {
+    section
+        .lines()
+        .next()
+        .map_or(section, str::trim)
+        .to_ascii_lowercase()
+}
+
 fn apply_skills(root: &Path, options: ApplyOptions) -> ProjectResult<String> {
     let skills = read_project_skills(root)?;
     let mut changes = Vec::new();
@@ -300,7 +441,14 @@ fn read_project_skills(root: &Path) -> ProjectResult<Vec<ProjectSkill>> {
         )));
     }
 
-    let mut paths = fs::read_dir(&skills_dir)
+    read_project_skills_from_dir(&skills_dir, true)
+}
+
+fn read_project_skills_from_dir(
+    skills_dir: &Path,
+    require_non_empty: bool,
+) -> ProjectResult<Vec<ProjectSkill>> {
+    let mut paths = fs::read_dir(skills_dir)
         .map_err(project_io_error)?
         .map(|entry| entry.map(|entry| entry.path()).map_err(project_io_error))
         .collect::<ProjectResult<Vec<_>>>()?;
@@ -329,7 +477,7 @@ fn read_project_skills(root: &Path) -> ProjectResult<Vec<ProjectSkill>> {
         skills.push(ProjectSkill { name, content });
     }
 
-    if skills.is_empty() {
+    if skills.is_empty() && require_non_empty {
         return Err(ProjectError::InvalidConfiguration(format!(
             "no skills found in {SKILLS_DIR}"
         )));
@@ -1079,6 +1227,7 @@ mod tests {
 
         assert!(output.contains("codex-skils init [--force]"));
         assert!(output.contains("codex-skils apply [--force] [--dry-run] [--readme]"));
+        assert!(output.contains("codex-skils codex [--print|--output <FILE>]"));
         assert!(output.contains("codex-skils list"));
         assert!(output.contains("codex-skils skill <name> [--format markdown|json|yaml]"));
         assert!(output.contains("codex-skils skill <name> --write [--force]"));
@@ -1109,6 +1258,113 @@ mod tests {
                 "listen port must be a number from 1 to 65535".to_string()
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_mode_works_with_no_skills() -> ProjectResult<()> {
+        let root = test_root("codex-no-skills")?;
+        write_test_file(
+            &root.join("AGENTS.md"),
+            "# AGENTS.md\n\nFollow local rules.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["codex"]))?;
+
+        assert!(output.starts_with("codex prompt generated\nmerged 0 skill(s)"));
+        assert!(output.contains("You are a senior software engineer working in this repository."));
+        assert!(output.contains("Follow local rules."));
+        assert!(output.contains("Operating instructions:"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_mode_merges_multiple_skills() -> ProjectResult<()> {
+        let root = test_root("codex-multiple-skills")?;
+        write_test_file(&root.join("AGENTS.md"), "# AGENTS.md\n")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/rust.md"),
+            "# Rust\n\nUse Rust.",
+        )?;
+        write_test_file(
+            &root.join(".codex-skils/skills/security.md"),
+            "# Security\n\nValidate input.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["codex", "--print"]))?;
+
+        assert!(output.contains("merged 2 skill(s)"));
+        assert!(output.contains("# Rust"));
+        assert!(output.contains("# Security"));
+        assert!(output.contains("- Make minimal changes"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_mode_removes_duplicate_sections() -> ProjectResult<()> {
+        let root = test_root("codex-dedupe")?;
+        write_test_file(&root.join(".codex-skils/skills/a.md"), "# Shared\n\nFirst.")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/b.md"),
+            "# Shared\n\nSecond.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["codex"]))?;
+
+        assert_eq!(output.matches("# Shared").count(), 1);
+        assert!(output.contains("First."));
+        assert!(!output.contains("Second."));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_mode_ignores_existing_managed_agents_skills() -> ProjectResult<()> {
+        let root = test_root("codex-managed-agents")?;
+        let agents = format!(
+            "# AGENTS.md\n\n{SKILLS_BEGIN_MARKER}\n## Skills\n\n### rust\n\n# Rust\n\nOld.\n\n{SKILLS_END_MARKER}\n"
+        );
+        write_test_file(&root.join("AGENTS.md"), &agents)?;
+        write_test_file(
+            &root.join(".codex-skils/skills/rust.md"),
+            "# Rust\n\nCurrent.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["codex"]))?;
+
+        assert_eq!(output.matches("# Rust").count(), 1);
+        assert!(!output.contains("Old."));
+        assert!(output.contains("Current."));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_mode_writes_output_file() -> ProjectResult<()> {
+        let root = test_root("codex-output")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/testing.md"),
+            "# Testing\n\nTest well.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["codex", "--output", "prompt.txt"]))?;
+        let prompt = fs::read_to_string(root.join("prompt.txt")).map_err(project_io_error)?;
+
+        assert_eq!(
+            output,
+            "codex prompt generated\nmerged 1 skill(s)\nwrote prompt.txt"
+        );
+        assert!(prompt.contains("You are a senior software engineer working in this repository."));
+        assert!(prompt.contains("# Testing"));
+        assert!(prompt.contains("- Explain changes briefly"));
+
+        cleanup(&root)?;
         Ok(())
     }
 

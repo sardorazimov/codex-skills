@@ -30,6 +30,7 @@ cargo run -p codex-sk-cli --bin codex-skils -- init
 cargo run -p codex-sk-cli --bin codex-skils -- skill rust --write
 cargo run -p codex-sk-cli --bin codex-skils -- apply --dry-run
 cargo run -p codex-sk-cli --bin codex-skils -- apply
+cargo run -p codex-sk-cli --bin codex-skils -- codex --output prompt.txt
 cargo run -p codex-sk-cli --bin codex-skils -- check
 ```
 
@@ -140,6 +141,19 @@ codex-skils apply --readme --force
 ```
 
 `apply` is idempotent. Re-running it does not duplicate skill content.
+
+### `codex`
+
+Generate a Codex-ready system prompt from `AGENTS.md` and local skills.
+
+```bash
+codex-skils codex
+codex-skils codex --print
+codex-skils codex --output prompt.txt
+```
+
+The prompt includes repository rules, merged skill content, and operating
+instructions for making minimal, checked changes.
 
 ### `list`
 
