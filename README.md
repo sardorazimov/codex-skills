@@ -304,3 +304,4 @@ See `CONTRIBUTING.md` for project guidelines.
 ## License
 
 Licensed under the Apache License, Version 2.0. See `LICENSE` for details.
+See the architecture overview: [docs/architecture/overview.md](docs/architecture/overview.md)
