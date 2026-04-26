@@ -1,0 +1,12 @@
+[package]
+name = "codex-sk-protocol"
+description = "Protocol types and validation boundaries for codex-sk."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

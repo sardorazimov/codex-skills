@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a focused improvement.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please keep proposals focused. Larger architecture changes may need an RFC after initial discussion.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or contributor problem should this solve?
+      placeholder: It is currently hard to ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful version of the change.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Rust core
+        - Rust protocol
+        - Rust runtime
+        - Rust CLI
+        - Python SDK
+        - Documentation
+        - CI or repository maintenance
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider?
+    validations:
+      required: false
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and risks
+      description: Could this affect public APIs, behavior, security, or contributors?
+    validations:
+      required: false

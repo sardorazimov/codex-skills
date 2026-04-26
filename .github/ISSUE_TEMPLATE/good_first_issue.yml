@@ -1,0 +1,58 @@
+name: Good first issue
+description: Suggest a beginner-friendly task.
+title: "good first issue: "
+labels: ["good first issue"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for tasks that are small, well-scoped, and suitable for new contributors.
+  - type: textarea
+    id: task
+    attributes:
+      label: Task
+      description: What should be changed?
+      placeholder: Update the Python README to include ...
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Likely files
+      description: List files or directories a contributor should start with.
+      placeholder: |
+        - bindings/python/README.md
+        - examples/minimal/python_example.py
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: Definition of done
+      description: How will a contributor know the issue is complete?
+      placeholder: |
+        - README includes the new command
+        - Existing tests still pass
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Suggested checks
+      description: Commands the contributor should run, if applicable.
+      placeholder: |
+        cargo test --workspace
+        python -m pytest bindings/python/tests
+    validations:
+      required: false
+  - type: checkboxes
+    id: suitability
+    attributes:
+      label: Suitability checklist
+      options:
+        - label: The task is small and does not require architecture redesign.
+          required: true
+        - label: The expected outcome is clear.
+          required: true
+        - label: A maintainer can review it without extensive context.
+          required: true

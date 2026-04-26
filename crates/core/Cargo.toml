@@ -1,0 +1,13 @@
+[package]
+name = "codex-sk-core"
+description = "Core engine primitives for codex-sk."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+codex-sk-protocol = { path = "../protocol" }
+
+[lints]
+workspace = true

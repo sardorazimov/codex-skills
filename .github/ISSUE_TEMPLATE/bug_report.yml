@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible problem.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem. Clear reproduction steps help maintainers fix issues faster.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: The CLI exits successfully, but it prints the wrong health status.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest set of steps that shows the problem.
+      placeholder: |
+        1. Run `cargo run -p codex-sk-cli -- health check`
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include relevant output.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Rust core
+        - Rust protocol
+        - Rust runtime
+        - Rust CLI
+        - Python SDK
+        - Documentation
+        - CI or repository maintenance
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Add versions when relevant.
+      placeholder: |
+        OS:
+        Rust:
+        Python:
+        codex-sk commit:
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Logs, links, or notes. Do not include secrets.
+    validations:
+      required: false

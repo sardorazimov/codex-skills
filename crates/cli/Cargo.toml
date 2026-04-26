@@ -1,0 +1,19 @@
+[package]
+name = "codex-sk-cli"
+description = "Command-line interface for codex-sk."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "codex-sk"
+path = "src/main.rs"
+
+[dependencies]
+codex-sk-core = { path = "../core" }
+codex-sk-protocol = { path = "../protocol" }
+codex-sk-runtime = { path = "../runtime" }
+
+[lints]
+workspace = true
