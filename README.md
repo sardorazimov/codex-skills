@@ -149,11 +149,15 @@ Generate a Codex-ready system prompt from `AGENTS.md` and local skills.
 ```bash
 codex-skils codex
 codex-skils codex --print
+codex-skils codex --compact
+codex-skils codex --explain
 codex-skils codex --output prompt.txt
 ```
 
-The prompt includes repository rules, merged skill content, and operating
-instructions for making minimal, checked changes.
+The prompt includes a senior engineer role, repository context, active skill
+summary, merged skill content, execution rules, validation rules, and concise
+output guidance. Use `--compact` for a shorter rules-only prompt and `--explain`
+to include how the prompt was assembled.
 
 ### `list`
 

@@ -88,12 +88,8 @@ fn run_in_root(root: &Path, args: &[String]) -> ProjectResult<String> {
         [command, flags @ ..] if command == "apply" => {
             apply_skills(root, ApplyOptions::parse(flags)?)
         }
-        [command] if command == "codex" => generate_codex_prompt(root, None),
-        [command, flag] if command == "codex" && flag == "--print" => {
-            generate_codex_prompt(root, None)
-        }
-        [command, output_flag, output] if command == "codex" && output_flag == "--output" => {
-            generate_codex_prompt(root, Some(output))
+        [command, flags @ ..] if command == "codex" => {
+            generate_codex_prompt(root, CodexOptions::parse(flags)?)
         }
         [command] if command == "list" => Ok(list_skills()),
         [command] if command == "check" => check_project(root),
@@ -199,7 +195,7 @@ fn help_output() -> String {
             "  codex-skils --version",
             "  codex-skils init [--force]",
             "  codex-skils apply [--force] [--dry-run] [--readme]",
-            "  codex-skils codex [--print|--output <FILE>]",
+            "  codex-skils codex [--print] [--output <FILE>] [--compact] [--explain]",
             "  codex-skils list",
             "  codex-skils skill <name> [--format markdown|json|yaml]",
             "  codex-skils skill <name> --write [--force]",
@@ -262,22 +258,151 @@ fn check_project(root: &Path) -> ProjectResult<String> {
     }
 }
 
-fn generate_codex_prompt(root: &Path, output: Option<&str>) -> ProjectResult<String> {
-    let agents = read_optional_file(&root.join("AGENTS.md"))?;
-    let skills = read_project_skills_optional(root)?;
-    let prompt = build_codex_prompt(agents.as_deref(), &skills);
-    let summary = format!("codex prompt generated\nmerged {} skill(s)", skills.len());
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CodexOptions<'a> {
+    output: Option<&'a str>,
+    compact: bool,
+    explain: bool,
+}
 
-    if let Some(output) = output {
+impl<'a> CodexOptions<'a> {
+    fn parse(flags: &'a [String]) -> ProjectResult<Self> {
+        let mut options = Self::default();
+        let mut index = 0;
+
+        while index < flags.len() {
+            match flags[index].as_str() {
+                "--print" => {
+                    index += 1;
+                }
+                "--compact" => {
+                    options.compact = true;
+                    index += 1;
+                }
+                "--explain" => {
+                    options.explain = true;
+                    index += 1;
+                }
+                "--output" => {
+                    let Some(output) = flags.get(index + 1) else {
+                        return Err(ProjectError::InvalidCommand(
+                            "codex --output requires a file path".to_string(),
+                        ));
+                    };
+                    options.output = Some(output);
+                    index += 2;
+                }
+                flag => {
+                    return Err(ProjectError::InvalidCommand(format!(
+                        "unsupported codex option: {flag}"
+                    )));
+                }
+            }
+        }
+
+        Ok(options)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ProjectConfig {
+    project_type: Option<String>,
+}
+
+impl ProjectConfig {
+    fn read_optional(root: &Path) -> ProjectResult<Self> {
+        let Some(content) = read_optional_file(&root.join(CONFIG_PATH))? else {
+            return Ok(Self::default());
+        };
+
+        Ok(Self {
+            project_type: find_toml_string_value(&content, "project_type"),
+        })
+    }
+}
+
+fn generate_codex_prompt(root: &Path, options: CodexOptions) -> ProjectResult<String> {
+    let agents = read_optional_file(&root.join("AGENTS.md"))?;
+    let config = ProjectConfig::read_optional(root)?;
+    let skills = read_project_skills_optional(root)?;
+    let detected_languages = detect_languages(root);
+    let prompt = build_codex_prompt(
+        agents.as_deref(),
+        &skills,
+        &config,
+        &detected_languages,
+        options.compact,
+    );
+    let summary = format!("codex prompt generated\nmerged {} skill(s)", skills.len());
+    let explanation = options
+        .explain
+        .then(|| format_codex_explanation(&skills, &config, &detected_languages, options.compact));
+
+    if let Some(output) = options.output {
         let path = root.join(output);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(project_io_error)?;
         }
         fs::write(path, prompt).map_err(project_io_error)?;
-        Ok(format!("{summary}\nwrote {output}"))
+        let mut output = format!("{summary}\nwrote {output}");
+        if let Some(explanation) = explanation {
+            output.push_str("\n\n");
+            output.push_str(&explanation);
+        }
+        Ok(output)
     } else {
-        Ok(format!("{summary}\n\n{prompt}"))
+        let mut output = format!("{summary}\n\n{prompt}");
+        if let Some(explanation) = explanation {
+            output.push_str("\n\n");
+            output.push_str(&explanation);
+        }
+        Ok(output)
     }
+}
+
+fn find_toml_string_value(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        if left.trim() != key {
+            continue;
+        }
+
+        let value = right.trim();
+        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+            return Some(value[1..value.len() - 1].to_string());
+        }
+    }
+
+    None
+}
+
+fn detect_languages(root: &Path) -> Vec<&'static str> {
+    let mut languages = Vec::new();
+    if root.join("Cargo.toml").is_file() {
+        languages.push("Rust");
+    }
+    if root.join("pyproject.toml").is_file()
+        || root.join("requirements.txt").is_file()
+        || root.join("setup.py").is_file()
+        || root.join("bindings/python/pyproject.toml").is_file()
+    {
+        languages.push("Python");
+    }
+    if root.join("package.json").is_file() {
+        languages.push("JavaScript");
+    }
+    if root.join("go.mod").is_file() {
+        languages.push("Go");
+    }
+
+    languages
 }
 
 fn read_optional_file(path: &Path) -> ProjectResult<Option<String>> {
@@ -297,25 +422,114 @@ fn read_project_skills_optional(root: &Path) -> ProjectResult<Vec<ProjectSkill>>
     read_project_skills_from_dir(&skills_dir, false)
 }
 
-fn build_codex_prompt(agents: Option<&str>, skills: &[ProjectSkill]) -> String {
-    let mut sections = Vec::new();
+fn build_codex_prompt(
+    agents: Option<&str>,
+    skills: &[ProjectSkill],
+    config: &ProjectConfig,
+    detected_languages: &[&str],
+    compact: bool,
+) -> String {
+    let mut context = Vec::new();
+    if let Some(project_type) = config.project_type.as_deref() {
+        context.push(format!("- Project type: {project_type}"));
+    }
+    if !detected_languages.is_empty() {
+        context.push(format!(
+            "- Detected language: {}",
+            detected_languages.join(", ")
+        ));
+    }
 
+    if compact {
+        return build_compact_codex_prompt(agents, skills, &context);
+    }
+
+    let mut skill_sections = Vec::new();
+
+    if let Some(agents) = agents.and_then(non_empty_trimmed) {
+        if let Some(cleaned) = non_empty_trimmed(&strip_codex_managed_sections(agents)) {
+            skill_sections.push(cleaned.to_string());
+        }
+    }
+
+    skill_sections.extend(deduplicated_skill_sections(skills));
+
+    let skill_content = if skill_sections.is_empty() {
+        "No repository-specific skills were found. Use the minimal safe rules below.".to_string()
+    } else {
+        skill_sections.join("\n\n")
+    };
+
+    format!(
+        "## System role\n\nYou are a senior software engineer working in this repository.\n\n## Context\n\n{}\n\n## Active skills\n\n{}\n\n## Skills\n\n{}\n\n## Execution rules\n\n- Make minimal changes\n- Do not break existing behavior\n- Prefer simple solutions\n- Follow project structure\n- Ask for clarification if unsure\n\n## Validation\n\n- Always run required checks before finishing\n- If checks fail, fix them\n\n## Output format\n\n- Explain changes briefly\n- Keep responses concise",
+        format_context(&context),
+        format_active_skills(skills),
+        skill_content
+    )
+}
+
+fn build_compact_codex_prompt(
+    agents: Option<&str>,
+    skills: &[ProjectSkill],
+    context: &[String],
+) -> String {
+    let mut sections = Vec::new();
     if let Some(agents) = agents.and_then(non_empty_trimmed) {
         if let Some(cleaned) = non_empty_trimmed(&strip_codex_managed_sections(agents)) {
             sections.push(cleaned.to_string());
         }
     }
-
     sections.extend(deduplicated_skill_sections(skills));
 
-    let rules = if sections.is_empty() {
-        "No repository-specific skills were found.".to_string()
+    format!(
+        "Role: senior software engineer in this repository.\n\nContext:\n{}\n\nActive skills:\n{}\n\nRules:\n- Make minimal changes\n- Do not break existing behavior\n- Prefer simple solutions\n- Follow project structure\n- Run required checks before finishing\n- Fix failing checks\n- Explain changes briefly\n- Keep responses concise\n\n{}",
+        format_context(context),
+        format_active_skills(skills),
+        if sections.is_empty() {
+            "No repository-specific skills were found.".to_string()
+        } else {
+            sections.join("\n\n")
+        }
+    )
+}
+
+fn format_context(context: &[String]) -> String {
+    if context.is_empty() {
+        "- Project type: not configured\n- Detected language: not detected".to_string()
     } else {
-        sections.join("\n\n")
+        context.join("\n")
+    }
+}
+
+fn format_active_skills(skills: &[ProjectSkill]) -> String {
+    if skills.is_empty() {
+        "- none".to_string()
+    } else {
+        skills
+            .iter()
+            .map(|skill| format!("- {}", skill.name))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn format_codex_explanation(
+    skills: &[ProjectSkill],
+    config: &ProjectConfig,
+    detected_languages: &[&str],
+    compact: bool,
+) -> String {
+    let project_type = config.project_type.as_deref().unwrap_or("not configured");
+    let languages = if detected_languages.is_empty() {
+        "not detected".to_string()
+    } else {
+        detected_languages.join(", ")
     };
 
     format!(
-        "You are a senior software engineer working in this repository.\n\nFollow these rules strictly:\n\n{rules}\n\nOperating instructions:\n- Make minimal changes\n- Keep code consistent\n- Run required checks before finishing\n- Do not break existing behavior\n- Explain changes briefly"
+        "Prompt build explanation:\n- mode: {}\n- project type: {project_type}\n- detected language: {languages}\n- skills merged: {}\n- duplicate skill sections removed by Markdown heading",
+        if compact { "compact" } else { "standard" },
+        skills.len()
     )
 }
 
@@ -1227,7 +1441,8 @@ mod tests {
 
         assert!(output.contains("codex-skils init [--force]"));
         assert!(output.contains("codex-skils apply [--force] [--dry-run] [--readme]"));
-        assert!(output.contains("codex-skils codex [--print|--output <FILE>]"));
+        assert!(output
+            .contains("codex-skils codex [--print] [--output <FILE>] [--compact] [--explain]"));
         assert!(output.contains("codex-skils list"));
         assert!(output.contains("codex-skils skill <name> [--format markdown|json|yaml]"));
         assert!(output.contains("codex-skils skill <name> --write [--force]"));
@@ -1274,7 +1489,23 @@ mod tests {
         assert!(output.starts_with("codex prompt generated\nmerged 0 skill(s)"));
         assert!(output.contains("You are a senior software engineer working in this repository."));
         assert!(output.contains("Follow local rules."));
-        assert!(output.contains("Operating instructions:"));
+        assert!(output.contains("## Active skills\n\n- none"));
+        assert!(output.contains("## Execution rules"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_mode_falls_back_without_agents_or_skills() -> ProjectResult<()> {
+        let root = test_root("codex-empty-fallback")?;
+
+        let output = run_in_root(&root, &strings(&["codex"]))?;
+
+        assert!(output.contains("merged 0 skill(s)"));
+        assert!(output.contains("No repository-specific skills were found."));
+        assert!(output.contains("- Make minimal changes"));
+        assert!(output.contains("- Always run required checks before finishing"));
 
         cleanup(&root)?;
         Ok(())
@@ -1296,9 +1527,73 @@ mod tests {
         let output = run_in_root(&root, &strings(&["codex", "--print"]))?;
 
         assert!(output.contains("merged 2 skill(s)"));
+        assert!(output.contains("## System role"));
+        assert!(output.contains("## Context"));
+        assert!(output.contains("## Active skills\n\n- rust\n- security"));
         assert!(output.contains("# Rust"));
         assert!(output.contains("# Security"));
         assert!(output.contains("- Make minimal changes"));
+        assert!(output.contains("- Do not break existing behavior"));
+        assert!(output.contains("- Always run required checks before finishing"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_mode_includes_config_and_detected_language() -> ProjectResult<()> {
+        let root = test_root("codex-context")?;
+        write_test_file(
+            &root.join(".codex-skils/config.toml"),
+            "schema_version = 1\nproject_type = \"infrastructure\"\n",
+        )?;
+        write_test_file(&root.join("Cargo.toml"), "[workspace]\n")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/rust.md"),
+            "# Rust\n\nUse Rust.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["codex"]))?;
+
+        assert!(output.contains("- Project type: infrastructure"));
+        assert!(output.contains("- Detected language: Rust"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_compact_mode_is_shorter() -> ProjectResult<()> {
+        let root = test_root("codex-compact")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/testing.md"),
+            "# Testing\n\nTest well.",
+        )?;
+
+        let standard = run_in_root(&root, &strings(&["codex"]))?;
+        let compact = run_in_root(&root, &strings(&["codex", "--compact"]))?;
+
+        assert!(compact.len() < standard.len());
+        assert!(compact.contains("Role: senior software engineer in this repository."));
+        assert!(!compact.contains("## System role"));
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codex_explain_mode_prints_build_info() -> ProjectResult<()> {
+        let root = test_root("codex-explain")?;
+        write_test_file(
+            &root.join(".codex-skils/skills/security.md"),
+            "# Security\n\nValidate input.",
+        )?;
+
+        let output = run_in_root(&root, &strings(&["codex", "--explain"]))?;
+
+        assert!(output.contains("Prompt build explanation:"));
+        assert!(output.contains("- mode: standard"));
+        assert!(output.contains("- skills merged: 1"));
 
         cleanup(&root)?;
         Ok(())
