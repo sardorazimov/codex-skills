@@ -754,7 +754,7 @@ fn apply_managed_section(
             target.status_for_write(),
             "managed section added",
         ),
-        Err(message) if target.force => {
+        Err(_message) if target.force => {
             let cleaned = remove_managed_markers(&original, begin_marker, end_marker);
             (
                 append_section(&cleaned, &section),
